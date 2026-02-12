@@ -1,0 +1,294 @@
+local dss = game:GetService("DataStoreService")
+local questsDS = dss:GetDataStore("quests_data")
+
+local quests = {
+	["Play for 10 minutes"] = {10, 500},
+	["Walk 500 studs"] = {500, 100},
+	["Stand still for 30 seconds"] = {30, 50},
+	["Jump 100 times"] = {100, 800},
+	["Play for 20 minutes"] = {20, 500},
+	["Play for 40 minutes"] = {40, 500},
+	["Play for 60 minutes"] = {60, 500},
+	["Play for 100 minutes"] = {100, 500},
+}
+
+local numQuests = 2 -- The Number of quests per day.
+
+function saveData(plr)
+	if not (plr and plr.leaderstats and plr.Quests and plr.Quests:FindFirstChild("LastRefresh")) then return end
+
+	local success, err = pcall(function()
+		local cash = plr.leaderstats.Cash.Value
+		local questsFolder = plr.Quests
+		local lastRefresh = questsFolder.LastRefresh.Value
+		local currentQuests = {}
+
+		for _, child in pairs(questsFolder:GetChildren()) do
+			if child:IsA("Folder") then
+				local progress = child:FindFirstChild("Progress")
+				if progress then
+					local completed = child:FindFirstChild("Completed") ~= nil
+					currentQuests[child.Name] = {progress.Value, completed}
+				end
+			end
+		end
+
+		local dataList = {
+			cash = cash,
+			refresh = lastRefresh,
+			quests = currentQuests
+		}
+
+		questsDS:SetAsync(plr.UserId, dataList)
+	end)
+
+	if not success then
+		warn("Failed to save data for", plr.Name, err)
+	end
+end
+
+game.Players.PlayerRemoving:Connect(saveData)
+game:BindToClose(function()
+	for _, plr in pairs(game.Players:GetPlayers()) do
+		saveData(plr)
+	end
+end)
+
+game.Players.PlayerAdded:Connect(function(plr)
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = plr
+
+	local cash = Instance.new("IntValue")
+	cash.Name = "Cash"
+	cash.Parent = leaderstats
+
+	local questsFolder = Instance.new("Folder")
+	questsFolder.Name = "Quests"
+	questsFolder.Parent = plr
+
+	local jumpConnections = {}
+
+	local function setupCharacterQuests(char)
+		for _, conn in pairs(jumpConnections) do
+			conn:Disconnect()
+		end
+		table.clear(jumpConnections)
+
+		if not char or not char:FindFirstChild("Humanoid") then return end
+
+		local humanoid = char.Humanoid
+
+		for _, child in pairs(questsFolder:GetChildren()) do
+			if child:IsA("Folder") and not child:FindFirstChild("Completed") then
+				local progress = child:FindFirstChild("Progress")
+				local goal = child:FindFirstChild("Goal")
+
+				if progress and goal then
+					if child.Name == "Jump 100 times" then
+						local connection = humanoid.Jumping:Connect(function(active)
+							if active and progress and progress.Parent then
+								progress.Value = math.clamp(progress.Value + 1, 0, goal.Value)
+
+								if progress.Value >= goal.Value and not child:FindFirstChild("Completed") then
+									local completed = Instance.new("BoolValue")
+									completed.Name = "Completed"
+									completed.Parent = child
+
+									if quests[child.Name] and cash then
+										cash.Value = cash.Value + quests[child.Name][2]
+									end
+								end
+							end
+						end)
+						table.insert(jumpConnections, connection)
+
+					elseif child.Name == "Walk 500 studs" then
+						task.spawn(function()
+							local lastPos = char:FindFirstChild("HumanoidRootPart") and 
+								char.HumanoidRootPart.Position * Vector3.new(1, 0, 1)
+
+							while progress and progress.Parent and progress.Value < goal.Value do
+								task.wait(0.1)
+								if char and char:FindFirstChild("HumanoidRootPart") then
+									local currentPos = char.HumanoidRootPart.Position * Vector3.new(1, 0, 1)
+									if lastPos then
+										local distance = (lastPos - currentPos).Magnitude
+										progress.Value = math.clamp(progress.Value + distance, 0, goal.Value)
+									end
+									lastPos = currentPos
+								end
+							end
+
+							if progress and progress.Value >= goal.Value and child.Parent and not child:FindFirstChild("Completed") then
+								local completed = Instance.new("BoolValue")
+								completed.Name = "Completed"
+								completed.Parent = child
+
+								if quests[child.Name] and cash then
+									cash.Value = cash.Value + quests[child.Name][2]
+								end
+							end
+						end)
+
+					elseif child.Name == "Stand still for 30 seconds" then
+						task.spawn(function()
+							local startTime = os.time()
+
+							while progress and progress.Parent and progress.Value < goal.Value do
+								task.wait(0.5)
+								if char and char:FindFirstChild("Humanoid") then
+									if char.Humanoid.MoveDirection.Magnitude > 0 then
+										startTime = os.time()
+									end
+
+									local timeStill = os.time() - startTime
+									progress.Value = math.clamp(timeStill, 0, goal.Value)
+								end
+							end
+
+							if progress and progress.Value >= goal.Value and child.Parent and not child:FindFirstChild("Completed") then
+								local completed = Instance.new("BoolValue")
+								completed.Name = "Completed"
+								completed.Parent = child
+
+								if quests[child.Name] and cash then
+									cash.Value = cash.Value + quests[child.Name][2]
+								end
+							end
+						end)
+					end
+				end
+			end
+		end
+	end
+	
+	plr.CharacterAdded:Connect(function(char)
+		task.wait(1)
+		setupCharacterQuests(char)
+	end)
+
+	if plr.Character then
+		task.wait(1)
+		setupCharacterQuests(plr.Character)
+	end
+
+	local success, data = pcall(function()
+		return questsDS:GetAsync(plr.UserId)
+	end)
+
+	local cashData = 0
+	local lastRefresh = os.time()
+	local currentQuests = {}
+
+	if success and data then
+		cashData = data.cash or 0
+		lastRefresh = data.refresh or os.time()
+		currentQuests = data.quests or {}
+	end
+
+	if not success or not data or os.time() - lastRefresh >= (24*60*60) then
+		currentQuests = {}
+		lastRefresh = os.time()
+
+		local questDescs = {}
+		for desc, _ in pairs(quests) do
+			table.insert(questDescs, desc)
+		end
+
+		for i = 1, numQuests do
+			if #questDescs > 0 then
+				local randomIndex = math.random(1, #questDescs)
+				local randomQuest = questDescs[randomIndex]
+				table.remove(questDescs, randomIndex)
+				currentQuests[randomQuest] = {0, false}
+			end
+		end
+	end
+
+	cash.Value = cashData
+
+	local refreshValue = Instance.new("NumberValue")
+	refreshValue.Name = "LastRefresh"
+	refreshValue.Value = lastRefresh
+	refreshValue.Parent = questsFolder
+
+	for questDesc, info in pairs(currentQuests) do
+		if quests[questDesc] then
+			local questFolder = Instance.new("Folder")
+			questFolder.Name = questDesc
+			questFolder.Parent = questsFolder
+
+			local progressValue = Instance.new("NumberValue")
+			progressValue.Name = "Progress"
+			progressValue.Value = info[1] or 0
+			progressValue.Parent = questFolder
+
+			local goalValue = Instance.new("NumberValue")
+			goalValue.Name = "Goal"
+			goalValue.Value = quests[questDesc][1]
+			goalValue.Parent = questFolder
+
+			local rewardValue = Instance.new("NumberValue")
+			rewardValue.Name = "Reward"
+			rewardValue.Value = quests[questDesc][2]
+			rewardValue.Parent = questFolder
+
+			if info[2] == true then
+				local completedValue = Instance.new("BoolValue")
+				completedValue.Name = "Completed"
+				completedValue.Parent = questFolder
+			end
+
+			if string.match(questDesc, "Play for") and not info[2] then
+				local previous = os.time()
+				local goalMinutes = quests[questDesc][1]
+
+				task.spawn(function()
+					while progressValue and progressValue.Parent and progressValue.Value < goalValue.Value do
+						task.wait(1)
+						local now = os.time()
+						local timeDiff = (now - previous) / 60
+						progressValue.Value = math.clamp(progressValue.Value + timeDiff, 0, goalValue.Value)
+						previous = now
+					end
+
+					if progressValue and progressValue.Parent and progressValue.Value >= goalValue.Value 
+						and not questFolder:FindFirstChild("Completed") then
+						local completed = Instance.new("BoolValue")
+						completed.Name = "Completed"
+						completed.Parent = questFolder
+
+						if cash then
+							cash.Value = cash.Value + quests[questDesc][2]
+						end
+					end
+				end)
+			end
+		end
+	end
+
+	for questDesc, info in pairs(currentQuests) do
+		if string.match(questDesc, "Play for") and not info[2] and quests[questDesc] then
+			local questFolder = questsFolder:FindFirstChild(questDesc)
+			if questFolder then
+				local progressValue = questFolder:FindFirstChild("Progress")
+				local goalValue = questFolder:FindFirstChild("Goal")
+
+				if progressValue and goalValue and not questFolder:FindFirstChild("Completed") then
+					local previous = os.time()
+
+					task.spawn(function()
+						while progressValue and progressValue.Parent and progressValue.Value < goalValue.Value do
+							task.wait(1)
+							local now = os.time()
+							local timeDiff = (now - previous) / 60
+							progressValue.Value = math.clamp(progressValue.Value + timeDiff, 0, goalValue.Value)
+							previous = now
+						end
+					end)
+				end
+			end
+		end
+	end
+end)
